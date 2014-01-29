@@ -1,0 +1,96 @@
+Homework 1: William Koh (willkjh)
+========================================================
+width: 1440
+height: 900
+transition: none
+font-family: 'Helvetica'
+css: my_style.css
+author: William Koh
+date: `r format(Sys.Date(), format="%B %d,%Y")`
+
+First Slide
+========================================================
+
+```{r, eval=TRUE}
+library(knitr)
+library(pander)
+Update <- FALSE
+if(Update){
+  source("http://bioconductor.org/biocLite.R")
+  # Install all core packages and update all installed packages
+  biocLite()
+  biocLite(c("GEOmetadb", "GEOquery"))
+}
+#opts_chunk$set(cache=TRUE)
+```
+Caching first
+
+Question 1
+========================================================
+
+Use the GEOmetabd package to find all HCV gene expression data using the Illumina platform submitted by an investigator at Yale. This should be done with a single query, showing the title, the GSE accession number, the GPL accession number and the manufacturer and the description of the platform used.
+
+```{r, echo=FALSE}
+library(GEOmetadb)
+if(Update){
+  getSQLiteFile()
+}
+geo_con <- dbConnect(SQLite(),'GEOmetadb.sqlite')
+```
+Description of method
+========================================================
+Here I search from where the data comes from Homo Sapiens and selected summaries table that contain the name HCV. 
+In addition, I filter out contact authors who are not from Yale Institute or authors whose correspondence has email which is like yale.edu.
+
+Code + Output 
+========================================================
+
+```{r, echo=TRUE,}
+query <- "SELECT DISTINCT  gse.title, gse.gse, gpl.gpl,gpl.manufacturer,gpl.description 
+          FROM gse JOIN gse_gpl ON gse.gse=gse_gpl.gse 
+          JOIN gpl ON gse_gpl.gpl=gpl.gpl
+          WHERE gpl.organism LIKE '%Homo sapiens%' AND gpl.manufacturer LIKE '%Illumina%'AND gse.summary LIKE '%HCV%' AND gse.contact LIKE '%@yale.edu%'"
+          
+rs <- dbGetQuery(geo_con, query)
+
+```
+
+Output for Question 1
+========================================================
+
+```{r, eval=TRUE}
+pandoc.table(rs, style="grid")
+```
+
+Solution for Question 2
+========================================================
+Reproduce your above query using the data.table package. Again, try to use a single line of code. [Hint: You first need to convert all db tables to data.table tables].
+
+```{r,echo=FALSE}
+## Question 2
+## Obtain the gse, gpl and gse_gpl linker from database
+library(data.table)
+gse <- data.table(dbReadTable(geo_con, "gse"))
+gpl <- data.table(dbReadTable(geo_con, "gpl"))
+gse_gpl <- data.table(dbReadTable(geo_con, "gse_gpl"))
+```
+
+```{r}
+## Set key 
+setkeyv(gse, "gse")
+setkeyv(gpl, "gpl")
+setkeyv(gse_gpl, c("gse",  "gpl"))
+
+res2 <- merge(gse[gse_gpl][grepl("HCV", summary)&grepl("yale.edu", contact), j=list(title, gse, gpl)],gpl[grepl("Illumina", manufacturer), j=list(gpl, manufacturer, description)], by="gpl")
+```
+
+Output for Question 2
+========================================================
+
+```{r,echo=FALSE}
+pandoc.table(res2, style="grid" )
+##print(res2,  right=FALSE)
+```
+
+End of file
+
