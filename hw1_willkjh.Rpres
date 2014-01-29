@@ -92,5 +92,10 @@ pandoc.table(res2, style="grid" )
 ##print(res2,  right=FALSE)
 ```
 
-End of file
+Close all connections
+========================================================
+```{r,echo=FALSE}
+dbDisconnect(geo_con)
+```
+
 
