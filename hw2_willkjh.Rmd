@@ -1,0 +1,182 @@
+Title
+========================================================
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring web pages (click the **Help** toolbar button for more details on using R Markdown).
+
+Redoing the analysis performed in the paper 
+
+```{r download-raw-data, eval = FALSE}}
+library(GEOquery)
+library(limma)
+gds <- getGEO("GSE40812", destdir=".")
+save(gds, file = "hw2.RData")
+```
+
+Modified Raphael's function to only keep certain columns within the phenotype data entry or the sample information file.
+```{r read datafile}
+load("hw2.RData")
+### Sanitize data and metadata
+gds_new <- gds
+sanitize_pdata <- function(pd){
+keepCols <- c(
+  "title","characteristics_ch1.2",
+                         "description")
+pd <- pd[, keepCols]
+colnames(pd) <- c("title", "treatment", "description")
+pd$ptid <- sapply(strsplit(as.matrix(pd$title), split="_"), function(x) x[2])
+pd$Status <- sapply(strsplit(as.matrix(pd$title), split="_"), function(x) x[3])
+pd$Macrophage <- sapply(strsplit(as.matrix(pd$title), split="_"), function(x) x[5])
+pd$treatment <- gsub("treatment: ", "", pd$treatment)
+pd$description<-gsub("(-\\w*){2}$", "", pd$description)
+#pd$filename<-gsub(".CEL.gz", "", pd$filename)
+pd
+}
+
+pData(gds_new[[1]]) <- sanitize_pdata(pData(gds_new[[1]]))
+
+To reproduce the heatmap, we need to go through several steps. 
+We only require the Macrophage data. So keep those and throw away the rest
+```{r Reproducibility}
+
+gds2use <-  gds_new[[1]][,grep("MACRO", pData(gds_new[[1]])$Macro)]
+head(pData(gds2use))
+colnames(pData(gds2use)) 
+```
+
+Perform the journal's Poly(I.C) analysis. This is coded in my variable treatment. Poly IC are the treated measured expression after 24 hours with respect to Mock. For current purposes, this analysis ignores that subjects measurements were paired. 
+
+We can perform the analysis 2 ways to show that the authors ignored the pairing. 
+```{r PolyIC}
+## Set up the design matrix
+dsn <- model.matrix(~factor(treatment), pData(gds2use))
+
+## How a statistician who examine the data would perform the analysis
+corfit <- duplicateCorrelation(gds2use,dsn,block=pData(gds2use)$ptid)
+dsn.lmfit <- lmFit(gds2use, dsn, block=pData(gds2use)$ptid, correlation = corfit$consensus.correlation)
+efit <- eBayes(dsn.lmfit)
+fdrStat <- p.adjust(efit$p.value[,2], "BH")
+table(fdrStat<0.05 &(efit$coef[,2])< (-log2(1.5)))
+table(fdrStat<0.05 &(efit$coef[,2])> (log2(1.5)))
+efit[41832,]$coef
+fdrStat[41832]
+## dsn.fit2 <- contrasts.fit(dsn.lmfit)
+```
+
+In fact, they did the following for Poly IC analysis. This can be verified with Table S1.  
+```{r PolyICActualPaper}
+
+dsn.lmfit2 <- lmFit(gds2use, dsn)
+efit2 <- eBayes(dsn.lmfit2)
+fdr2 <- p.adjust(efit2$p.value[,2], "BH")
+efit2[41832,]$coef
+fdr2[41832]
+## Number of genes that were down-regulated
+table(fdr2<0.05 &(efit2$coef[,2])< (-log2(1.5)))
+## Number of genes that were up-regulated
+table(fdr2<0.05 &(efit2$coef[,2]) > log2(1.5))
+
+```
+Using the second approach where we did not reestimate the variance from the mixed model analysis, we obtained exactly what was described in results section paragraph 3. This can be verified from the S1 Table in their supplementary section.
+
+Performing the post polyIC analysis. In this section, we did the naive way by taking the difference between PolyIC vs Mock for each patient. Following that, we restrict analysis to only 1146 probesets. This trick is typical in most expression analysis just not explicitly stated.
+
+```{r PostPolyIC}
+
+## Restrict analysis to the below
+## There should only be 1146 probesets with 753 being up regulated and
+## 393 being down-regulated
+idxPolyIC <- ((fdr2<0.05 &(efit2$coef[,2])< (-log2(1.5)) )|(fdr2<0.05 &(efit2$coef[,2]) > log2(1.5)))
+library(data.table)
+polyIC.rslts <- data.table(ID=efit2[idxPolyIC, ]$genes$ID, 
+                          Gene=efit2[idxPolyIC, ]$genes$ILMN_Gene, 
+                          PolyICFC= efit2[idxPolyIC, ]$coefficients[,2], 
+                          FDR=fdr2[idxPolyIC])
+## Perform the analysis now by using the 2 sample t-test
+
+library(reshape)
+reOrdData <- with(pData(gds2use), cbind(ID=rownames(pData(gds2use)), ptid, treatment))
+reOrdData[,"treatment"] <- ifelse(reOrdData[, "treatment"]=="Mock", -1, 1)
+
+test <- (data.frame(reOrdData))
+test$treatment <- as.integer(as.matrix(test$treatment))
+test.wide <- cast(test,  ID ~ptid, value = "treatment", fill=0)
+match(names(exprs(gds2use)[1,]), test.wide[,1])
+gdsDiffData <- exprs(gds2use)%*%data.matrix(test.wide[,-1])
+colnames(gdsDiffData)
+## Matching patient id with hcv status
+sampleInfo <- unique(pData(gds2use)[, c("ptid", "Status")])
+idx <- order(sampleInfo$ptid, sampleInfo$Status)
+sampleInfo <- sampleInfo[idx,]
+is.unsorted(match(sampleInfo$ptid, colnames(gdsDiffData)))
+sampleInfo$Status <- factor(sampleInfo$Status, c("Pos", "Neg"))
+dsn2 <- model.matrix(~ Status , sampleInfo)
+
+## Restricted analysis to only those probesets that were filtered. 
+dsn2.paired <- lmFit(gdsDiffData[idxPolyIC,], dsn2)
+##dsn2.paired2 <- contrasts.fit(dsn2.paired,coefficients=2)
+efit2paired <- eBayes(dsn2.paired)
+fdr.p2 <- p.adjust(efit2paired$p.value[,2], method = "BH")
+
+## This shows no probesets left that satisfy the FDR correction. 
+## Note that when they say no probesets, they refer to only probesets which they filtered.
+
+table(fdr.p2<0.1)
+table(efit2paired$p.value[,2]<0.1)
+## To obtain the heatmap, just analyze based on 1146 probeset
+## Naive p values gives 53 probesets.
+ttest.p <- pt(abs(efit2paired$coef[,2]/efit2paired$stdev.unscaled[,2]/efit2paired$sigma), 
+    efit2paired$df.residual, lower = FALSE)*2
+
+## Finally 43 probesets
+print(table(ttest.p<0.1))
+## Note that the pvalues also match the S1 table
+
+```
+In the above, we obtain the 43 probesets as described for their heatmap. The p-values were not similar to what was done  in their output in S1 under the TwoWay pvalue. 
+
+```{r heatmap43}
+##
+idx.43 <- which(efit2paired$p.value[,2]<0.1)
+gds2use.Poly <- gds2use[idxPolyIC, ]
+gds2use.PolyFinal <- gds2use.Poly[idx.43, ]
+##polyIC.rslts
+
+frslts.43 <- data.table(ID=efit2paired[idx.43, ]$genes$ID, 
+                        ##Gene=efit2paired[idx.43, ]$genes$ILMN_Gene, 
+                        FCPos= efit2paired[idx.43, ]$coefficients[,1], 
+                        FCNeg= efit2paired[idx.43, ]$coefficients[,1] + efit2paired[idx.43, ]$coefficients[,2], 
+                        DiffFC= efit2paired[idx.43, ]$coefficients[,2] , 
+                        TwoWayP=efit2paired[idx.43, ]$p.value[,2])
+setkey(polyIC.rslts, "ID")
+setkey(frslts.43, "ID")
+S1Table <- polyIC.rslts[frslts.43]
+setkey(S1Table, TwoWayP)
+hmatDataPolyIC <- exprs(gds2use)[idxPolyIC, 1:40]
+
+
+heatmapData <- hmatDataPolyIC[idx.43, 1:40]
+
+sampleInfo2 <- pData(gds2use)[1:40,c("treatment", "ptid", "Status")]
+sortID <- order(sampleInfo2$treatment, sampleInfo2$Status, sampleInfo2$ptid)
+sampleInfo2 <- sampleInfo2[sortID,]
+tmp <- heatmapData[, sortID]
+## Sort probe ID by p-value
+sortProbID <- order(efit2paired$p.value[,2][idx.43])
+gds2use.PolyFinalsub <- gds2use.PolyFinal[sortProbID, ]
+heatmapFinal <- tmp[sortProbID, ]
+## check if ID is sorted
+is.unsorted(match(rownames(sampleInfo2), colnames(heatmapFinal)))
+
+colnames(heatmapFinal) <- sampleInfo2$ptid
+## Order by probeset p value
+heatmap.2((heatmapFinal)[match(names(S1Table$DiffFC[order(S1Table$DiffFC)]), 
+                    rownames(heatmapFinal)), ], 
+          Rowv=NA, Colv=NA, scale="row", trace= "none")
+
+fDataID <- fData(gds2use)[rownames(heatmapFinal),]
+heatmapFinal.scaled <- t(scale(t(heatmapFinal), rowMeans(heatmapFinal), apply(heatmapFinal, 1, sd)))
+heatmap.2(heatmapFinal.scaled[match(names(S1Table$DiffFC[order(S1Table$DiffFC)]),
+                                    rownames(heatmapFinal)),],
+          Rowv=NULL, Colv=NULL,
+          dendrogram="none", 
+          scale="none", trace= "none")
