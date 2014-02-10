@@ -1,14 +1,14 @@
-Title
+Title HW2 for William Koh (willkjh)
 ========================================================
 
 This is an R Markdown document. Markdown is a simple formatting syntax for authoring web pages (click the **Help** toolbar button for more details on using R Markdown).
 
 Redoing the analysis performed in the paper 
 
-```{r download-raw-data, eval = FALSE}}
+```{r download-raw-data, eval = FALSE}
 library(GEOquery)
 library(limma)
-gds <- getGEO("GSE40812", destdir=".")
+gds <- getGEO("GSE40812")
 save(gds, file = "hw2.RData")
 ```
 
@@ -33,6 +33,7 @@ pd
 }
 
 pData(gds_new[[1]]) <- sanitize_pdata(pData(gds_new[[1]]))
+```
 
 To reproduce the heatmap, we need to go through several steps. 
 We only require the Macrophage data. So keep those and throw away the rest
@@ -91,8 +92,11 @@ polyIC.rslts <- data.table(ID=efit2[idxPolyIC, ]$genes$ID,
                           Gene=efit2[idxPolyIC, ]$genes$ILMN_Gene, 
                           PolyICFC= efit2[idxPolyIC, ]$coefficients[,2], 
                           FDR=fdr2[idxPolyIC])
-## Perform the analysis now by using the 2 sample t-test
+```
+Based on the 1146 probesets, analyze the remaining using a 2 sample t-test but first take the difference between PolyIC (treated) vs Mock (untreated) for each patient.
 
+```{r Ttest1146}
+## Perform the analysis now by using the 2 sample t-test
 library(reshape)
 reOrdData <- with(pData(gds2use), cbind(ID=rownames(pData(gds2use)), ptid, treatment))
 reOrdData[,"treatment"] <- ifelse(reOrdData[, "treatment"]=="Mock", -1, 1)
@@ -119,9 +123,11 @@ fdr.p2 <- p.adjust(efit2paired$p.value[,2], method = "BH")
 
 ## This shows no probesets left that satisfy the FDR correction. 
 ## Note that when they say no probesets, they refer to only probesets which they filtered.
-
 table(fdr.p2<0.1)
+
+## This portion is the genes/probesets to be used for heatmap.
 table(efit2paired$p.value[,2]<0.1)
+
 ## To obtain the heatmap, just analyze based on 1146 probeset
 ## Naive p values gives 53 probesets.
 ttest.p <- pt(abs(efit2paired$coef[,2]/efit2paired$stdev.unscaled[,2]/efit2paired$sigma), 
@@ -132,13 +138,17 @@ print(table(ttest.p<0.1))
 ## Note that the pvalues also match the S1 table
 
 ```
-In the above, we obtain the 43 probesets as described for their heatmap. The p-values were not similar to what was done  in their output in S1 under the TwoWay pvalue. 
+In the above, we obtain the 43 probesets as described for their heatmap. The p-values from just the naive t-test were not similar to what was done  in their output in S1 under the TwoWay pvalue. Note that if we ran the analysis on all the probesets and not filtered out the 1146 probes, the p values would not match up. In some sense, their analysis is not that correct since they assume further that out of the 1146 probesets, some are not differentially expressed (modified t-test).
+
 
 ```{r heatmap43}
 ##
 idx.43 <- which(efit2paired$p.value[,2]<0.1)
+## Extract the 1146 probesets
 gds2use.Poly <- gds2use[idxPolyIC, ]
+print(gds2use.Poly)
 gds2use.PolyFinal <- gds2use.Poly[idx.43, ]
+print(gds2use.PolyFinal)
 ##polyIC.rslts
 
 frslts.43 <- data.table(ID=efit2paired[idx.43, ]$genes$ID, 
@@ -153,30 +163,33 @@ S1Table <- polyIC.rslts[frslts.43]
 setkey(S1Table, TwoWayP)
 hmatDataPolyIC <- exprs(gds2use)[idxPolyIC, 1:40]
 
-
 heatmapData <- hmatDataPolyIC[idx.43, 1:40]
 
 sampleInfo2 <- pData(gds2use)[1:40,c("treatment", "ptid", "Status")]
+## Sort the columns 
 sortID <- order(sampleInfo2$treatment, sampleInfo2$Status, sampleInfo2$ptid)
 sampleInfo2 <- sampleInfo2[sortID,]
 tmp <- heatmapData[, sortID]
+
 ## Sort probe ID by p-value
 sortProbID <- order(efit2paired$p.value[,2][idx.43])
 gds2use.PolyFinalsub <- gds2use.PolyFinal[sortProbID, ]
 heatmapFinal <- tmp[sortProbID, ]
 ## check if ID is sorted
 is.unsorted(match(rownames(sampleInfo2), colnames(heatmapFinal)))
-
+is.unsorted(match(S1Table$ID, rownames(heatmapFinal)))
 colnames(heatmapFinal) <- sampleInfo2$ptid
+library(gplots)
 ## Order by probeset p value
-heatmap.2((heatmapFinal)[match(names(S1Table$DiffFC[order(S1Table$DiffFC)]), 
-                    rownames(heatmapFinal)), ], 
-          Rowv=NA, Colv=NA, scale="row", trace= "none")
-
-fDataID <- fData(gds2use)[rownames(heatmapFinal),]
 heatmapFinal.scaled <- t(scale(t(heatmapFinal), rowMeans(heatmapFinal), apply(heatmapFinal, 1, sd)))
-heatmap.2(heatmapFinal.scaled[match(names(S1Table$DiffFC[order(S1Table$DiffFC)]),
-                                    rownames(heatmapFinal)),],
-          Rowv=NULL, Colv=NULL,
-          dendrogram="none", 
-          scale="none", trace= "none")
+sample.dist <- as.dist(1 - cor(t(heatmapFinal.scaled), method = "spearman"))
+sample.clust <- hclust(sample.dist, method = "ward")
+sample.clust$order
+library(pheatmap)
+pheatmap(heatmapFinal.scaled, ##kmeans_k=6,
+         cluster_rows = TRUE, cluster_cols = FALSE,
+         clustering_distance_rows = "euclidean", 
+         col=(heat.colors(30)),
+         clustering_method= "complete",scale = "row")
+          ##distfun="pearson" ,
+
